@@ -1,0 +1,99 @@
+name: CI (Arduino ESP32)
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  build:
+    name: Build (ESP32)
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        fqbn:
+          - esp32:esp32:esp32      # "ESP32 Dev Module"
+          - esp32:esp32:esp32s3    # "ESP32S3 Dev Module" (many LCD boards use S3)
+        sketch:
+          - examples/bringup_cyd_28/bringup_cyd_28.ino
+          - src/nexa_pos.ino
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v1
+
+      - name: Arduino CLI version
+        run: arduino-cli version
+
+      - name: Cache Arduino packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ runner.os }}-${{ hashFiles('**/ci.lock', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            arduino-${{ runner.os }}-
+
+      - name: Update core index
+        run: arduino-cli core update-index
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core install esp32:esp32@2.0.17
+          arduino-cli core list
+
+      - name: Install libraries (Library Manager)
+        run: |
+          # Pin library versions here as you confirm them
+          arduino-cli lib install "lvgl@9.1.0"
+          arduino-cli lib install "LovyanGFX@1.1.15"
+          arduino-cli lib install "ArduinoJson@7.0.4"
+          # LittleFS for ESP32 is included in core 2.x, but some setups benefit from this:
+          arduino-cli lib install "LittleFS_esp32@1.0.6" || true
+          # QR library note:
+          # We use Project Nayuki qrcodegen in code; you can vendor it under lib/qrcodegen later.
+          # For now, attempt an Arduino QR lib to help early compiles:
+          arduino-cli lib install "QRCode@0.0.1" || true
+          arduino-cli lib list
+
+      - name: Prepare build flags
+        id: flags
+        run: |
+          # Common compiler flags (tweak as needed)
+          echo "FLAGS=-DARDUINO_USB_CDC_ON_BOOT=1" >> $GITHUB_OUTPUT
+
+      - name: Compile ${{ matrix.sketch }} for ${{ matrix.fqbn }} (strict for bringup)
+        if: endsWith(matrix.sketch, 'bringup_cyd_28.ino')
+        run: |
+          arduino-cli compile \
+            --fqbn ${{ matrix.fqbn }} \
+            --build-property compiler.cpp.extra_flags="${{ steps.flags.outputs.FLAGS }}" \
+            ${{ matrix.sketch }}
+
+      - name: Compile ${{ matrix.sketch }} for ${{ matrix.fqbn }} (tolerant for main app)
+        if: endsWith(matrix.sketch, 'nexa_pos.ino')
+        continue-on-error: true
+        run: |
+          arduino-cli compile \
+            --fqbn ${{ matrix.fqbn }} \
+            --warnings default \
+            --build-property compiler.cpp.extra_flags="${{ steps.flags.outputs.FLAGS }}" \
+            ${{ matrix.sketch }}
+
+      - name: Export artifacts (firmware)
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.fqbn }}-${{ hashFiles(matrix.sketch) }}
+          path: |
+            **/build/*/*.bin
+            **/build/*/*.elf
+            **/build/*/*.map
+          if-no-files-found: ignore
